@@ -18,6 +18,8 @@ if (!BSKY_IDENTIFIER || !BSKY_APP_PASSWORD) {
 
 const FEED_URL = "https://daringfireball.net/feeds/json";
 const POLL_INTERVAL_MS = 3 * 60 * 1000; // 3 minutes
+const BACKFILL_COUNT = 5; // number of recent posts to backfill on first run
+const BACKFILL_DELAY_MS = 10 * 1000; // 10 seconds between backfill posts
 
 // ── SQLite ─────────────────────────────────────────────────────────────────────
 
@@ -35,6 +37,14 @@ function markSeen(id: string): void {
     id,
     Date.now(),
   ]);
+}
+
+function isDbEmpty(): boolean {
+  return !db.query("SELECT 1 FROM seen_items LIMIT 1").get();
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 // ── JSON Feed types ────────────────────────────────────────────────────────────
@@ -217,7 +227,7 @@ async function postItem(agent: BskyAgent, item: FeedItem): Promise<void> {
 
 // ── Main polling loop ──────────────────────────────────────────────────────────
 
-async function poll(agent: BskyAgent, isFirstRun: boolean): Promise<void> {
+async function poll(agent: BskyAgent): Promise<void> {
   let items: FeedItem[];
   try {
     items = await fetchFeed();
@@ -226,18 +236,51 @@ async function poll(agent: BskyAgent, isFirstRun: boolean): Promise<void> {
     return;
   }
 
+  const firstRun = isDbEmpty();
+
+  if (firstRun) {
+    // True first run: backfill the N most recent items, then seed the rest
+    // Feed items are newest-first; post oldest-first so they appear in order
+    const toPost = items.slice(0, BACKFILL_COUNT).reverse();
+    const toSeed = items.slice(BACKFILL_COUNT);
+
+    console.log(
+      `First run: backfilling ${toPost.length} post(s), seeding ${toSeed.length} older item(s)...`
+    );
+
+    for (let i = 0; i < toPost.length; i++) {
+      const item = toPost[i];
+      const itemId = item.id;
+      if (!itemId) continue;
+      try {
+        await postItem(agent, item);
+        markSeen(itemId);
+      } catch (err) {
+        console.error(`Failed to post item ${itemId}:`, err);
+        markSeen(itemId); // still mark seen to avoid retrying indefinitely
+      }
+      // Space out posts, but skip the delay after the last one
+      if (i < toPost.length - 1) {
+        await sleep(BACKFILL_DELAY_MS);
+      }
+    }
+
+    // Seed the remaining older items without posting
+    for (const item of toSeed) {
+      const itemId = item.id;
+      if (!itemId) continue;
+      markSeen(itemId);
+    }
+
+    console.log("Backfill complete.");
+    return;
+  }
+
+  // Normal poll: post any items not yet seen
   for (const item of items) {
     const itemId = item.id;
     if (!itemId) continue;
-
     if (hasSeen(itemId)) continue;
-
-    if (isFirstRun) {
-      // On first startup, seed without posting
-      markSeen(itemId);
-      console.log(`Seeded (no post): ${itemId}`);
-      continue;
-    }
 
     try {
       await postItem(agent, item);
@@ -259,11 +302,11 @@ await agent.login({
 });
 console.log("Logged in.");
 
-// First run: seed seen items without posting
-await poll(agent, true);
-console.log("Seed complete. Polling for new items every 3 minutes...");
+// Initial poll: backfills on true first run, or catches up on restart
+await poll(agent);
+console.log("Initial poll complete. Polling for new items every 3 minutes...");
 
 // Subsequent polls
 setInterval(async () => {
-  await poll(agent, false);
+  await poll(agent);
 }, POLL_INTERVAL_MS);
