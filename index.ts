@@ -5,11 +5,15 @@ import { Database } from "bun:sqlite";
 
 // ── Environment ────────────────────────────────────────────────────────────────
 
-const BSKY_IDENTIFIER = process.env.BSKY_IDENTIFIER ?? "";
-const BSKY_APP_PASSWORD = process.env.BSKY_APP_PASSWORD ?? "";
+const BSKY_IDENTIFIER = import.meta.main
+  ? process.env.BSKY_IDENTIFIER ?? ""
+  : "";
+const BSKY_APP_PASSWORD = import.meta.main
+  ? process.env.BSKY_APP_PASSWORD ?? ""
+  : "";
 const BSKY_PDS_URL = process.env.BSKY_PDS_URL ?? "https://bsky.social";
 
-if (!BSKY_IDENTIFIER || !BSKY_APP_PASSWORD) {
+if (import.meta.main && (!BSKY_IDENTIFIER || !BSKY_APP_PASSWORD)) {
   console.error(
     "Missing required env vars: BSKY_IDENTIFIER and BSKY_APP_PASSWORD"
   );
@@ -165,10 +169,24 @@ async function uploadImage(
   }
 }
 
+// ── URL resolution ─────────────────────────────────────────────────────────────
+
+/**
+ * Returns the URL to embed in a Bluesky post for a given feed item.
+ *
+ * Daring Fireball "Linked List" posts have both `url` (the DF permalink) and
+ * `external_url` (the third-party site being linked to). We always want to
+ * link to the DF permalink so readers land on Gruber's commentary, not the
+ * external site directly.
+ */
+export function resolvePostUrl(item: FeedItem): string {
+  return item.url ?? item.id;
+}
+
 // ── Post a single feed item ────────────────────────────────────────────────────
 
 async function postItem(agent: BskyAgent, item: FeedItem): Promise<void> {
-  const embedUrl = item.external_url ?? item.url ?? item.id;
+  const embedUrl = resolvePostUrl(item);
   const title = item.title ?? "";
 
   // Validate that we have a usable URL before attempting to post
@@ -293,20 +311,22 @@ async function poll(agent: BskyAgent): Promise<void> {
 
 // ── Startup ────────────────────────────────────────────────────────────────────
 
-const agent = new BskyAgent({ service: BSKY_PDS_URL });
+if (import.meta.main) {
+  const agent = new BskyAgent({ service: BSKY_PDS_URL });
 
-console.log(`Logging in to ${BSKY_PDS_URL} as ${BSKY_IDENTIFIER}...`);
-await agent.login({
-  identifier: BSKY_IDENTIFIER,
-  password: BSKY_APP_PASSWORD,
-});
-console.log("Logged in.");
+  console.log(`Logging in to ${BSKY_PDS_URL} as ${BSKY_IDENTIFIER}...`);
+  await agent.login({
+    identifier: BSKY_IDENTIFIER,
+    password: BSKY_APP_PASSWORD,
+  });
+  console.log("Logged in.");
 
-// Initial poll: backfills on true first run, or catches up on restart
-await poll(agent);
-console.log("Initial poll complete. Polling for new items every 3 minutes...");
-
-// Subsequent polls
-setInterval(async () => {
+  // Initial poll: backfills on true first run, or catches up on restart
   await poll(agent);
-}, POLL_INTERVAL_MS);
+  console.log("Initial poll complete. Polling for new items every 3 minutes...");
+
+  // Subsequent polls
+  setInterval(async () => {
+    await poll(agent);
+  }, POLL_INTERVAL_MS);
+}
